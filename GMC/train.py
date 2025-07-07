@@ -11,7 +11,7 @@ from GMC.utils.evaluation import evaluate_retrieval
 import sys
 import json
 
-sys.path.append("/public/atiqa/Hygraph")
+sys.path.append("/public/atiqa/Hygraph") #Local path to Hygraph repository
 from config import Config
 
 # === Triplet Loss Implementation ===

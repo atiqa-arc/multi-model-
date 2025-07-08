@@ -12,7 +12,7 @@ import sys
 import json
 
 sys.path.append("/public/atiqa/Hygraph") #Local path to Hygraph repository
-from config import Config
+from GMC.config import Config
 
 # === Triplet Loss Implementation ===
 class TripletLoss(torch.nn.Module):

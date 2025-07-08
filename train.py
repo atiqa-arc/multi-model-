@@ -11,8 +11,8 @@ from GMC.utils.evaluation import evaluate_retrieval
 import sys
 import json
 
-sys.path.append("/public/atiqa/Hygraph")
-from config import Config
+sys.path.append("/public/atiqa/Hygraph") #Local path to Hygraph repository
+from GMC.config import Config
 
 # === Triplet Loss Implementation ===
 class TripletLoss(torch.nn.Module):

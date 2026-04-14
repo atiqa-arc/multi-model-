@@ -2,6 +2,7 @@ import argparse
 import sys
 from pathlib import Path
 import csv
+from collections import Counter
 import torch
 from tqdm import tqdm
 from pycocoevalcap.bleu.bleu import Bleu
@@ -166,6 +167,17 @@ def evaluate(model, loader, device,  max_new_tokens=56, num_beams=3, save_csv_pa
 
     save_sample_scores_to_csv(sample_rows, save_csv_path)
 
+    if all_hyp_texts:
+        uniq = len(set(all_hyp_texts))
+        total = len(all_hyp_texts)
+        top_text, top_count = Counter(all_hyp_texts).most_common(1)[0]
+        uniq_ratio = uniq / total
+        print(f"Unique predictions: {uniq}/{total} ({uniq_ratio:.2%})")
+        print(f"Most common prediction count: {top_count}")
+        if uniq_ratio < 0.10:
+            print("[Warning] Prediction collapse detected: less than 10% unique outputs.")
+            print(f"[Warning] Most frequent prediction snippet: {top_text[:140]}")
+
     scorers = [
         (Bleu(4), ["BLEU-1", "BLEU-2", "BLEU-3", "BLEU-4"]),
         (Meteor(), "METEOR"),
@@ -177,7 +189,7 @@ def evaluate(model, loader, device,  max_new_tokens=56, num_beams=3, save_csv_pa
 
     for scorer, method in scorers:
         try:
-            score,  = scorer.compute_score(gts, res)
+            score, _ = scorer.compute_score(gts, res)
         except Exception as e:
             print(f"{method} failed: {e}")
             if isinstance(method, list):
@@ -216,9 +228,11 @@ def main():
     p.add_argument('--data', default='/public/ATIQA/Datasets/iu_xray/')
     p.add_argument('--batch_size', type=int, default=16)
     p.add_argument('--max_new_tokens', type=int, default=56)
-    p.add_argument('--num_beams', type=int, default=4)
+    p.add_argument('--num_beams', type=int, default=1)
     p.add_argument('--text_model_name', default='/public/model/Llama-3.2-3B-Instruct')
     p.add_argument('--csv_path', type=str, default='/public/ATIQA/multimodel_bridge/test_results.csv')
+    p.add_argument('--strict_load', action='store_true', default=True)
+    p.add_argument('--allow_partial_load', action='store_true')
 
     args = p.parse_args()
 
@@ -238,9 +252,12 @@ def main():
         mc_passes=mc_passes
     ).to(device)
 
-    missing, unexpected = model.load_state_dict(ck['state_dict'], strict=False)
+    strict_flag = args.strict_load and not args.allow_partial_load
+    missing, unexpected = model.load_state_dict(ck['state_dict'], strict=strict_flag)
     print("Missing keys:", missing)
     print("Unexpected keys:", unexpected)
+    if (missing or unexpected) and strict_flag:
+        raise RuntimeError("Checkpoint mismatch detected with strict loading enabled.")
 
     _, _, test_loader, _ = get_loaders_com(
         dataset='medical',

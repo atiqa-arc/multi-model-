@@ -171,6 +171,18 @@ class LatentMemoryBridgeModel(nn.Module):
             latent_dim=self.latent_dim,
             hidden_size=adapter_hidden_size,
         )
+
+        # Fixed report prefix used in both teacher forcing and generation to align behaviors.
+        prompt_tokens = self.tokenizer("Findings:", add_special_tokens=False, return_tensors="pt")
+        prompt_ids = prompt_tokens["input_ids"]
+        if prompt_ids.numel() == 0:
+            fallback_id = self.decoder.config.bos_token_id
+            if fallback_id is None:
+                fallback_id = self.tokenizer.bos_token_id
+            if fallback_id is None:
+                fallback_id = self.decoder.config.eos_token_id
+            prompt_ids = torch.tensor([[fallback_id]], dtype=torch.long)
+        self.register_buffer("report_prompt_ids", prompt_ids.long(), persistent=False)
     
 
     def _decode_mean(self, output):
@@ -259,8 +271,17 @@ class LatentMemoryBridgeModel(nn.Module):
     def forward(self, images, input_ids, attention_mask):
         enc_states, enc_mask, _ = self._extract_memory(images)
 
-        labels = input_ids.clone()
-        labels[attention_mask == 0] = -100
+        bsz = input_ids.size(0)
+        prompt_ids = self.report_prompt_ids.to(device=input_ids.device, dtype=input_ids.dtype).expand(bsz, -1)
+        prompt_mask = torch.ones_like(prompt_ids)
+
+        input_ids = torch.cat([prompt_ids, input_ids], dim=1)
+        attention_mask = torch.cat([prompt_mask, attention_mask], dim=1)
+
+        text_labels = input_ids[:, prompt_ids.size(1):].clone()
+        text_labels[attention_mask[:, prompt_ids.size(1):] == 0] = -100
+        prompt_labels = torch.full_like(prompt_ids, -100)
+        labels = torch.cat([prompt_labels, text_labels], dim=1)
 
         return self.decoder(
             input_ids=input_ids,
@@ -276,13 +297,8 @@ class LatentMemoryBridgeModel(nn.Module):
             enc_states, enc_mask, _ = self._extract_memory(images)
 
         bsz = images.size(0)
-        bos_id = self.decoder.config.bos_token_id
-        if bos_id is None:
-            bos_id = self.tokenizer.bos_token_id
-        if bos_id is None:
-            bos_id = self.decoder.config.eos_token_id
-
-        bos = torch.full((bsz, 1), bos_id, dtype=torch.long, device=images.device)
+        prefix_ids = self.report_prompt_ids.to(device=images.device).expand(bsz, -1)
+        prefix_mask = torch.ones_like(prefix_ids)
 
 
         eos_id = self.decoder.config.eos_token_id
@@ -291,14 +307,15 @@ class LatentMemoryBridgeModel(nn.Module):
             
 
         return self.decoder.generate(
-           input_ids=bos,
-            attention_mask=torch.ones_like(bos),
+           input_ids=prefix_ids,
+            attention_mask=prefix_mask,
             encoder_hidden_states=enc_states,
             encoder_attention_mask=enc_mask,
             max_new_tokens=max_new_tokens,
             num_beams=num_beams,
             do_sample=False,
             no_repeat_ngram_size=2,
+            repetition_penalty=1.1,
             early_stopping=True,
             use_cache=use_cache,
             eos_token_id=eos_id,

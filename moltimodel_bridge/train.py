@@ -34,6 +34,10 @@ def configure_trainable_params(model, stage, train_last_n_layers=1, train_lm_hea
             for p_ in layer.parameters():
                 p_.requires_grad = True
 
+        if hasattr(model.decoder.model, "norm"):
+            for p_ in model.decoder.model.norm.parameters():
+                p_.requires_grad = True
+
         if train_lm_head and hasattr(model.decoder, "lm_head"):
             for p_ in model.decoder.lm_head.parameters():
                 p_.requires_grad = True
@@ -117,8 +121,9 @@ def main():
     p.add_argument("--init_ckpt", default="")
     p.add_argument("--stage", choices=["stage1", "stage2"], default="stage2")
     p.add_argument("--saved", default="")
-    p.add_argument("--train_last_n_layers", type=int, default=1)
-    p.add_argument("--train_lm_head", action="store_true")
+    p.add_argument("--train_last_n_layers", type=int, default=4)
+    p.add_argument("--train_lm_head", action="store_true", default=True)
+    p.add_argument("--freeze_lm_head", action="store_true")
     args = p.parse_args()
     if not args.saved:
         if args.stage == "stage2":
@@ -144,7 +149,7 @@ def main():
         model,
         stage=args.stage,
         train_last_n_layers=args.train_last_n_layers,
-        train_lm_head=args.train_lm_head,
+        train_lm_head=(args.train_lm_head and not args.freeze_lm_head),
     )
     print_trainable_params(model)
 
@@ -164,7 +169,8 @@ def main():
     for ep in range(args.epochs):
         tr = train(model, train_loader, opt, device, args.grad_accum_steps)
         va = validate(model, valid_loader, device)
-        print(f"epoch {ep+1}: train_loss={tr:.4f} val_loss={va:.4f}")
+        gate_value = float(model.decoder.cross_attn_gate.detach().item())
+        print(f"epoch {ep+1}: train_loss={tr:.4f} val_loss={va:.4f} cross_attn_gate={gate_value:.4f}")
 
         if va < (best_val - min_delta):
             best_val = va

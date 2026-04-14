@@ -33,7 +33,8 @@ class LlamaForCausalLMWithCrossAttention(LlamaForCausalLM):
             dropout=getattr(config, "attention_dropout", 0.0),
             batch_first=True,
         )
-        self.cross_attn_gate = nn.Parameter(torch.tensor(0.01))
+        # A less tiny initialization helps the bridge signal influence decoding early.
+        self.cross_attn_gate = nn.Parameter(torch.tensor(0.2))
     
     
 

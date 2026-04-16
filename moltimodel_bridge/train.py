@@ -1,9 +1,11 @@
 import argparse
+import math
 import sys
 from pathlib import Path
 import torch
 import torch.optim as optim
 from tqdm import tqdm
+from transformers import get_cosine_schedule_with_warmup
 from model_bridge import LatentMemoryBridgeModel
 BIOGPT_ROOT = Path("/public/ATIQA/BioGPTLLM")
 sys.path.insert(0, str(BIOGPT_ROOT))
@@ -49,7 +51,7 @@ def print_trainable_params(model):
     for name in names:
         print(f"  {name}")
 
-def train(model, loader, optimizer, device, grad_accum_steps):
+def train(model, loader, optimizer, scheduler, device, grad_accum_steps):
     model.train()
     model.nvae.eval()
 
@@ -78,6 +80,7 @@ def train(model, loader, optimizer, device, grad_accum_steps):
         if step % grad_accum_steps == 0 or step == len(loader):
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
+            scheduler.step()
             optimizer.zero_grad(set_to_none=True)
 
         total += out.loss.item()
@@ -114,6 +117,8 @@ def main():
     p.add_argument("--gpu_id", type=int, default=0)
     p.add_argument("--epochs", type=int, default=40)
     p.add_argument("--lr", type=float, default=5e-6)
+    p.add_argument("--weight_decay", type=float, default=0.01)
+    p.add_argument("--warmup_ratio", type=float, default=0.1)
     p.add_argument("--grad_accum_steps", type=int, default=4)
     p.add_argument("--bridge_type", choices=["baseline", "latent_memory"], default="latent_memory")
     p.add_argument("--mc_passes", type=int, default=10)
@@ -122,8 +127,10 @@ def main():
     p.add_argument("--stage", choices=["stage1", "stage2"], default="stage2")
     p.add_argument("--saved", default="")
     p.add_argument("--train_last_n_layers", type=int, default=4)
-    p.add_argument("--train_lm_head", action="store_true", default=True)
+    p.add_argument("--train_lm_head", dest="train_lm_head", action="store_true")
+    p.add_argument("--no_train_lm_head", dest="train_lm_head", action="store_false")
     p.add_argument("--freeze_lm_head", action="store_true")
+    p.set_defaults(train_lm_head=False)
     args = p.parse_args()
     if not args.saved:
         if args.stage == "stage2":
@@ -160,17 +167,29 @@ def main():
     )
 
     params = [x for x in model.parameters() if x.requires_grad]
-    opt = optim.AdamW(params, lr=args.lr)
+    opt = optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
+    steps_per_epoch = math.ceil(len(train_loader) / max(1, args.grad_accum_steps))
+    total_training_steps = max(1, steps_per_epoch * args.epochs)
+    warmup_steps = int(total_training_steps * args.warmup_ratio)
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer=opt,
+        num_warmup_steps=warmup_steps,
+        num_training_steps=total_training_steps,
+    )
 
     best_val = float("inf")
     epochs_without_improvement = 0
     min_delta = 1e-4
 
     for ep in range(args.epochs):
-        tr = train(model, train_loader, opt, device, args.grad_accum_steps)
+        tr = train(model, train_loader, opt, scheduler, device, args.grad_accum_steps)
         va = validate(model, valid_loader, device)
-        gate_value = float(model.decoder.cross_attn_gate.detach().item())
-        print(f"epoch {ep+1}: train_loss={tr:.4f} val_loss={va:.4f} cross_attn_gate={gate_value:.4f}")
+        gate_value = float((0.05 + 0.95 * torch.sigmoid(model.decoder.cross_attn_gate.detach())).item())
+        current_lr = float(opt.param_groups[0]["lr"])
+        print(
+            f"epoch {ep+1}: train_loss={tr:.4f} val_loss={va:.4f} "
+            f"cross_attn_gate={gate_value:.4f} lr={current_lr:.2e}"
+        )
 
         if va < (best_val - min_delta):
             best_val = va
